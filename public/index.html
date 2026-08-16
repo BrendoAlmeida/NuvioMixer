@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NuvioMixer</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <header><div><strong>NuvioMixer</strong><span>vídeo + áudio, sem recodificação</span></div><a id="manifest" target="_blank" rel="noreferrer">Manifest do addon</a></header>
+    <main>
+      <section class="card intro"><h1>Crie uma fonte combinada</h1><p>Escolha vídeo e áudio de addons instalados. O Mixer só inicia combinações que preservem os codecs e possam ser empacotadas sem perdas.</p></section>
+
+      <section class="card"><h2>1. Addons</h2><form id="addon-form" class="row"><input id="manifest-url" required type="url" placeholder="https://addon.exemplo/manifest.json"><button>Importar manifest</button></form><div id="addons" class="list"></div></section>
+
+      <section class="card"><h2>2. Localize o conteúdo</h2><div class="row"><input id="title-query" placeholder="Buscar filme ou série"><select id="catalog-type"><option value="movie">Filme</option><option value="series">Série</option></select><button id="catalog-search" type="button">Buscar</button></div><div id="catalog-results" class="tiles"></div><form id="source-form" class="row detail"><input id="content-id" required placeholder="ID IMDb/TMDB, ex. tt0137523"><select id="content-type"><option value="movie">Filme</option><option value="series">Série</option></select><input id="season" type="number" min="1" placeholder="Temporada"><input id="episode" type="number" min="1" placeholder="Episódio"><button>Consultar fontes</button></form></section>
+
+      <section class="card"><h2>3. Selecione vídeo e áudio</h2><p class="hint">Torrents só ficam disponíveis quando um gateway de torrent for configurado. Fontes diretas com headers são suportadas.</p><div id="source-errors" class="errors"></div><div id="sources" class="sources"><p class="empty">Consulte um conteúdo para listar fontes.</p></div><form id="mix-form" class="stack" hidden><input id="mix-label" required placeholder="Nome exibido, ex. 4K + PT-BR"><label>Offset de áudio (segundos)<input id="audio-offset" type="number" value="0" step="0.1"></label><div class="row"><button id="preflight" type="button">Validar sem perdas</button><button type="submit">Salvar combinação</button></div><p id="preflight-result" class="hint"></p></form></section>
+
+      <section class="card"><h2>Combinações salvas</h2><div id="mixes" class="list"></div></section>
+
+      <details class="card"><summary>Conectar conta Nuvio</summary><p class="hint">O Mixer descobre automaticamente a configuração pública do Nuvio. Sua senha não é salva; apenas a sessão renovável fica cifrada no volume Docker.</p><p id="credentials-warning" class="errors" hidden></p><form id="nuvio-form" class="stack"><input id="nuvio-api" type="url" value="https://api.nuvio.tv" required><input id="nuvio-email" type="email" placeholder="E-mail Nuvio" required><input id="nuvio-password" type="password" placeholder="Senha Nuvio" required><select id="nuvio-profile" disabled><option value="">Conecte para carregar perfis</option></select><div class="row"><button>Conectar</button><button id="nuvio-import" type="button" disabled>Importar addons</button></div></form></details>
+    </main>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

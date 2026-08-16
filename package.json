@@ -1,0 +1,32 @@
+{
+  "name": "nuvio-mixer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node src/server.js",
+    "test": "npm run test:server && npm run test:ui",
+    "test:server": "node --test src/*.test.js",
+    "test:ui": "vitest run",
+    "check": "node --check src/server.js && node --check src/media.js && node --check src/store.js && node --check src/stremio.js && node --check src/catalog.js && node --check src/source-jobs.js && node --check src/series.js && npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "hls.js": "^1.7.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.2",
+    "@vitejs/plugin-react": "^6.0.5",
+    "jsdom": "^30.0.1",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10"
+  }
+}

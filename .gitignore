@@ -1,0 +1,6 @@
+.env
+data/*.json
+data/sessions/
+node_modules/
+dist/
+npm-debug.log*

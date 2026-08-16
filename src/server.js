@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { extname, join } from 'node:path';
 import { config } from './config.js';
 import { cleanupSessions, discardSession, ensureSession, getSessionFile, preflight, sessionStatus, shutdownSessions } from './media.js';
-import { deleteAddon, deleteMix, getMix, getNuvioConnection, getNuvioConnectionInfo, listAddons, listMixes, saveAddon, saveMix, saveNuvioConnection, saveSecret, updateAddon } from './store.js';
+import { deleteAddon, deleteMix, getMix, getNuvioConnection, getNuvioConnectionInfo, hasSecret, listAddons, listMixes, saveAddon, saveMix, saveNuvioConnection, saveSecret, updateAddon } from './store.js';
 import { assertSourceUrl, connectNuvio, getStreams, importManifest, listNuvioAddons } from './stremio.js';
 import { getCatalogDetail, searchCatalog } from './catalog.js';
 import { cancelSourceJob, createSourceJob, getSourceJob, retryableAddonIds, subscribeSourceJob } from './source-jobs.js';
@@ -71,7 +71,7 @@ function sanitizeSource(source) {
     const headers = Object.fromEntries(Object.entries(source.headers || {}).filter(([key, value]) => /^[A-Za-z0-9-]+$/.test(key) && typeof value === 'string' && !/[\r\n]/.test(value)));
     return { kind: 'url', url: source.url, headers, title: String(source.title || ''), name: String(source.name || ''), filename: source.filename || null, sourceAddonId: source.sourceAddonId || null, sourceAddonName: source.sourceAddonName || null };
   }
-  if (source.kind === 'torrent' && /^[a-fA-F0-9]{40}$|^[a-zA-Z2-7]{32}$/.test(source.infoHash || '')) return { kind: 'torrent', infoHash: source.infoHash, fileIdx: Number(source.fileIdx || 0), sources: Array.isArray(source.sources) ? source.sources.slice(0, 30) : [], title: String(source.title || ''), name: String(source.name || ''), sourceAddonId: source.sourceAddonId || null, sourceAddonName: source.sourceAddonName || null };
+  if (source.kind === 'torrent' && /^[a-fA-F0-9]{40}$|^[a-zA-Z2-7]{32}$/.test(source.infoHash || '')) return { kind: 'torrent', infoHash: source.infoHash, fileIdx: Number(source.fileIdx || 0), sources: Array.isArray(source.sources) ? source.sources.slice(0, 30) : [], title: String(source.title || ''), name: String(source.name || ''), filename: typeof source.filename === 'string' ? source.filename.slice(0, 500) : null, sourceAddonId: source.sourceAddonId || null, sourceAddonName: source.sourceAddonName || null };
   throw new Error('Tipo de fonte não suportado.');
 }
 
@@ -166,7 +166,18 @@ async function importNuvioAddons(profileId) {
 }
 
 async function handleApi(request, response, url) {
-  if (url.pathname === '/api/health' && method(request, 'GET')) return send(response, 200, { ok: true, version: '0.1.0', baseUrl: config.baseUrl, torrentGatewayConfigured: Boolean(config.torrentGatewayUrl), credentialsStorageReady: Boolean(config.masterKey) });
+  if (url.pathname === '/api/health' && method(request, 'GET')) {
+    const torboxConfigured = Boolean(config.masterKey && hasSecret('debrid:torbox'));
+    return send(response, 200, {
+      ok: true,
+      version: '0.1.0',
+      baseUrl: config.baseUrl,
+      torrentGatewayConfigured: Boolean(config.torrentGatewayUrl),
+      torboxConfigured,
+      torrentSourceAvailable: Boolean(config.torrentGatewayUrl || torboxConfigured),
+      credentialsStorageReady: Boolean(config.masterKey)
+    });
+  }
   if (url.pathname === '/api/addons' && method(request, 'GET')) return send(response, 200, { addons: listAddons() });
   if (url.pathname === '/api/addons' && method(request, 'POST')) {
     const input = await body(request);

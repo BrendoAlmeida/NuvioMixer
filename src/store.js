@@ -128,6 +128,11 @@ export function getSecret(kind) {
   return secret ? decrypt(secret) : null;
 }
 
+export function hasSecret(kind) {
+  const secret = read().secrets.find((candidate) => candidate.kind === kind);
+  return Boolean(secret?.iv && secret?.tag && secret?.ciphertext);
+}
+
 export function saveNuvioConnection(connection) {
   const db = read();
   db.nuvio = { apiBase: connection.apiBase, profileId: connection.profileId || null, updatedAt: new Date().toISOString() };

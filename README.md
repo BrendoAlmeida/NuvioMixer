@@ -13,7 +13,7 @@ Servidor pessoal para combinar uma fonte de vídeo e outra de áudio e disponibi
 - Oferece prévia de sincronização com ajuste de offset do áudio.
 - Salva modelos de série: o addon procura a combinação equivalente de provedores/qualidade em cada episódio compatível.
 - Publica as combinações por um endpoint de addon Stremio, consumido pelo Nuvio.
-- Suporta fontes HTTP/HLS/DASH, debrid e torrents por gateway externo configurado.
+- Suporta fontes HTTP/HLS/DASH, fontes debrid e torrents via Torbox ou gateway externo legado.
 
 ## Compatibilidade
 
@@ -26,7 +26,7 @@ O dispositivo que reproduz o stream ainda precisa suportar os codecs da fonte. C
 - Docker Engine e Docker Compose v2.
 - Uma chave `MASTER_KEY` de 32 bytes em Base64.
 - Uma conta Nuvio, para a sincronização de addons.
-- Opcional: um gateway de torrent compatível, caso queira usar fontes torrent.
+- Opcional: uma chave de API do Torbox ou um gateway de torrent compatível, caso queira usar fontes torrent.
 
 ## Início rápido
 
@@ -59,12 +59,20 @@ Copie `.env.example` para `.env`. O `.env` e os dados de execução já estão i
 | `MASTER_KEY` | Obrigatória. Chave Base64 de 32 bytes usada para cifrar sessão Nuvio e segredos locais. |
 | `BASE_URL` | URL pública do Mixer. Use a URL HTTPS do Tailscale Funnel, Cloudflare Tunnel ou proxy reverso quando o Nuvio estiver em outra máquina. |
 | `PUID` / `PGID` | Usuário e grupo donos da pasta `data/` no host; normalmente `1000`. |
+| `SESSION_IDLE_MS` | Tempo, em milissegundos, que uma playlist VOD concluída e seus segmentos permanecem no disco após o último acesso. O padrão é `1800000` (30 minutos). |
 | `STREAM_START_TIMEOUT_MS` | Tempo máximo, em milissegundos, para finalizar a playlist HLS VOD. O padrão é `120000`. |
+| `TORBOX_RESOLVE_URLS` | Opt-in para encaminhar URLs diretas públicas elegíveis ao Torbox WebDL. O padrão é `false`. |
 | `TORRENT_GATEWAY_URL` | Gateway externo para resolver torrents. Deve responder a `GET /resolve?infoHash=<hash>&fileIdx=<índice>`. |
 | `ALLOW_INSECURE_HTTP` | Permite fontes HTTP. Avalie o risco antes de ativar em ambientes expostos. |
 | `ALLOW_PRIVATE_NETWORK` | Permite fontes em redes privadas/LAN. Avalie o risco antes de ativar. |
 
 Quando exposto remotamente, configure `BASE_URL` para a URL HTTPS externa antes de instalar o manifest no Nuvio. Não exponha a porta 7337 diretamente à internet sem uma camada de autenticação e controle de rede.
+
+### Torbox
+
+Em **Configurações**, salve a chave de API do Torbox. Ela é cifrada com `MASTER_KEY` no volume Docker e a API do Mixer expõe apenas se o Torbox está configurado — nunca a chave.
+
+O Torbox trata fontes torrent nativas no próprio serviço. A resolução de URLs diretas é desabilitada por padrão: ao definir `TORBOX_RESOLVE_URLS=true`, você autoriza o Mixer a encaminhar ao Torbox apenas URLs HTTP(S) públicas de arquivos, sem cabeçalhos de proxy, cookies, `Referer`, `Origin`, `User-Agent` ou outra autenticação fora da URL. Endereços privados/LAN e playlists HLS/DASH não são encaminhados. Fontes diretas que já venham de um debrid/Torbox seguem diretamente para o pipeline; elas não são reenviadas ao Torbox.
 
 ## Fluxo de uso
 
@@ -84,7 +92,7 @@ Para manter a duração estável, o Mixer produz uma playlist HLS VOD finalizada
 
 Fontes HLS/DASH com faixas separadas permitem buscar somente o áudio necessário. Em arquivos MKV/MP4 e torrents, o demux pode precisar ler dados de vídeo mesmo quando apenas o áudio é selecionado.
 
-Torrents não são reproduzidos diretamente pelo NuvioMixer: configure `TORRENT_GATEWAY_URL` para um serviço de sua confiança. O projeto não inclui nem opera esse gateway.
+Torrents não são reproduzidos diretamente pelo NuvioMixer: configure o Torbox em **Configurações** ou defina `TORRENT_GATEWAY_URL` para um serviço de sua confiança. O projeto não inclui nem opera o gateway legado.
 
 ## Desenvolvimento
 

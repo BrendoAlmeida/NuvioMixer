@@ -19,6 +19,8 @@ export const config = {
   allowInsecureHttp: bool(process.env.ALLOW_INSECURE_HTTP, true),
   allowPrivateNetwork: bool(process.env.ALLOW_PRIVATE_NETWORK, true),
   torrentGatewayUrl: process.env.TORRENT_GATEWAY_URL || '',
+  // WebDL envia a URL da fonte ao Torbox; só habilite conscientemente para URLs públicas elegíveis.
+  torboxResolveUrls: bool(process.env.TORBOX_RESOLVE_URLS, false),
   nuvioApiBase: (process.env.NUVIO_API_BASE || 'https://api.nuvio.tv').replace(/\/$/, ''),
   sessionIdleMs: Number(process.env.SESSION_IDLE_MS || 30 * 60 * 1000),
   streamStartTimeoutMs: positiveNumber(process.env.STREAM_START_TIMEOUT_MS, 120 * 1000)

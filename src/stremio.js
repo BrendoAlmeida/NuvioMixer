@@ -1,4 +1,6 @@
 import { config } from './config.js';
+import { getSecret } from './store.js';
+import { canUseWebDownload, createTorboxResolver } from './torbox.js';
 
 function privateAddress(hostname) {
   const normalized = hostname.toLowerCase();
@@ -44,6 +46,7 @@ export function normalizeStream(stream, addon) {
   if (stream.infoHash) return {
     kind: 'torrent', name: stream.name || addon.name, title: stream.description || stream.title || stream.name || addon.name,
     infoHash: stream.infoHash, fileIdx: Number(stream.fileIdx || 0), sources: stream.sources || [],
+    filename: stream.behaviorHints?.filename || stream.filename || null,
     quality: stream.quality || null, sourceAddonId: addon.id, sourceAddonName: addon.name
   };
   return null;
@@ -55,14 +58,48 @@ export async function getStreams(addon, type, id) {
   return response.streams.map((stream) => normalizeStream(stream, addon)).filter(Boolean);
 }
 
-export async function resolveTorrent(source) {
-  if (!config.torrentGatewayUrl) throw new Error('Esta fonte é torrent. Configure TORRENT_GATEWAY_URL para disponibilizá-la sem alterar o vídeo.');
-  const url = new URL('/resolve', config.torrentGatewayUrl);
+function savedTorboxResolver() {
+  const apiKey = getSecret('debrid:torbox')?.apiKey;
+  return typeof apiKey === 'string' && apiKey.trim() ? createTorboxResolver({ apiKey }) : null;
+}
+
+/**
+ * Torbox WebDL receives only a URL. It cannot reproduce source-side request state,
+ * so this boundary independently rejects private, playlist and stateful sources.
+ */
+export function canResolveWebDownload(source) {
+  return canUseWebDownload(source);
+}
+
+function webDownloadRequested(options) {
+  return options.requested === true || (options.requested === undefined && config.torboxResolveUrls);
+}
+
+export async function resolveTorrent(source, options = {}) {
+  const torbox = Object.hasOwn(options, 'torboxResolver') ? options.torboxResolver : savedTorboxResolver();
+  if (torbox) return torbox.resolveTorrent(source);
+
+  const gatewayUrl = options.torrentGatewayUrl ?? config.torrentGatewayUrl;
+  if (!gatewayUrl) throw new Error('Esta fonte é torrent. Configure uma chave Torbox ou TORRENT_GATEWAY_URL para disponibilizá-la sem alterar o vídeo.');
+  const url = new URL('/resolve', gatewayUrl);
   url.searchParams.set('infoHash', source.infoHash);
   url.searchParams.set('fileIdx', String(source.fileIdx));
-  const result = await fetchJson(url.toString());
+  const result = await (options.fetchJsonImpl || fetchJson)(url.toString());
   if (!result.url) throw new Error('O gateway de torrent não devolveu uma URL reproduzível.');
   return { ...source, kind: 'url', url: result.url, headers: result.headers || {} };
+}
+
+export async function resolveWebDownload(source, options = {}) {
+  if (!webDownloadRequested(options) || !canResolveWebDownload(source)) return source;
+  const torbox = Object.hasOwn(options, 'torboxResolver') ? options.torboxResolver : savedTorboxResolver();
+  if (!torbox || typeof torbox.resolveWebDownload !== 'function') return source;
+  return torbox.resolveWebDownload(source, { requested: true });
+}
+
+export async function resolveSource(source, options = {}) {
+  if (source?.kind === 'torrent') return resolveTorrent(source, options);
+  if (source?.kind === 'url') return resolveWebDownload(source, options);
+  return source;
 }
 
 function errorMessage(payload, fallback) {

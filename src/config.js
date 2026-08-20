@@ -23,8 +23,12 @@ export const config = {
   torboxResolveUrls: bool(process.env.TORBOX_RESOLVE_URLS, false),
   nuvioApiBase: (process.env.NUVIO_API_BASE || 'https://api.nuvio.tv').replace(/\/$/, ''),
   sessionIdleMs: Number(process.env.SESSION_IDLE_MS || 30 * 60 * 1000),
-  streamStartTimeoutMs: positiveNumber(process.env.STREAM_START_TIMEOUT_MS, 120 * 1000)
+  streamStartTimeoutMs: positiveNumber(process.env.STREAM_START_TIMEOUT_MS, 120 * 1000),
+  seekSegmentSeconds: positiveNumber(process.env.SEEK_SEGMENT_SECONDS, 4),
+  keyframeIndexTimeoutMs: positiveNumber(process.env.KEYFRAME_INDEX_TIMEOUT_MS, 20 * 60 * 1000)
 };
 
 mkdirSync(config.dataDir, { recursive: true });
 mkdirSync(resolve(config.dataDir, 'sessions'), { recursive: true });
+mkdirSync(resolve(config.dataDir, 'keyframes'), { recursive: true });
+mkdirSync(resolve(config.dataDir, 'preloads'), { recursive: true });

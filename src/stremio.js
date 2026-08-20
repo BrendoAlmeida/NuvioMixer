@@ -31,20 +31,22 @@ export async function importManifest(manifestUrl) {
   return { name: manifest.name, manifestUrl, transportUrl: manifestUrl, manifest };
 }
 
-function streamEndpoint(addon, type, id) {
+export function streamEndpoint(addon, type, id, { cacheBust } = {}) {
   const root = addon.transportUrl.replace(/\/manifest\.json(?:\?.*)?$/, '').replace(/\/$/, '');
-  return `${root}/stream/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`;
+  const endpoint = new URL(`${root}/stream/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`);
+  if (cacheBust !== undefined && cacheBust !== null) endpoint.searchParams.set('_nuviomixer_refresh', String(cacheBust));
+  return endpoint.toString();
 }
 
 export function normalizeStream(stream, addon) {
   const proxyHeaders = stream.behaviorHints?.proxyHeaders?.request || stream.headers || {};
   if (stream.url) return {
-    kind: 'url', name: stream.name || addon.name, title: stream.description || stream.title || stream.name || addon.name,
+    kind: 'url', name: stream.name || addon.name, sourceName: stream.name || null, title: stream.description || stream.title || stream.name || addon.name,
     url: stream.url, headers: proxyHeaders, filename: stream.behaviorHints?.filename || stream.filename || null,
     quality: stream.quality || null, sourceAddonId: addon.id, sourceAddonName: addon.name
   };
   if (stream.infoHash) return {
-    kind: 'torrent', name: stream.name || addon.name, title: stream.description || stream.title || stream.name || addon.name,
+    kind: 'torrent', name: stream.name || addon.name, sourceName: stream.name || null, title: stream.description || stream.title || stream.name || addon.name,
     infoHash: stream.infoHash, fileIdx: Number(stream.fileIdx || 0), sources: stream.sources || [],
     filename: stream.behaviorHints?.filename || stream.filename || null,
     quality: stream.quality || null, sourceAddonId: addon.id, sourceAddonName: addon.name
@@ -52,8 +54,17 @@ export function normalizeStream(stream, addon) {
   return null;
 }
 
-export async function getStreams(addon, type, id) {
-  const response = await fetchJson(streamEndpoint(addon, type, id));
+/** A selected stream's own label is more useful to viewers than its addon host. */
+export function sourceDisplayName(source, fallback = 'Fonte') {
+  const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const label = normalize(source?.sourceName) || normalize(source?.name) || normalize(source?.title) || normalize(source?.sourceAddonName) || fallback;
+  return label.slice(0, 120);
+}
+
+export async function getStreams(addon, type, id, { forceRefresh = false, cacheBust = Date.now() } = {}) {
+  const response = await fetchJson(streamEndpoint(addon, type, id, { cacheBust: forceRefresh ? cacheBust : null }), {
+    headers: forceRefresh ? { 'cache-control': 'no-cache' } : undefined
+  });
   if (!Array.isArray(response.streams)) throw new Error(`${addon.name} retornou uma resposta de streams inválida.`);
   return response.streams.map((stream) => normalizeStream(stream, addon)).filter(Boolean);
 }

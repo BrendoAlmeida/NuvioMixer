@@ -59,8 +59,10 @@ Copie `.env.example` para `.env`. O `.env` e os dados de execução já estão i
 | `MASTER_KEY` | Obrigatória. Chave Base64 de 32 bytes usada para cifrar sessão Nuvio e segredos locais. |
 | `BASE_URL` | URL pública do Mixer. Use a URL HTTPS do Tailscale Funnel, Cloudflare Tunnel ou proxy reverso quando o Nuvio estiver em outra máquina. |
 | `PUID` / `PGID` | Usuário e grupo donos da pasta `data/` no host; normalmente `1000`. |
-| `SESSION_IDLE_MS` | Tempo, em milissegundos, que uma playlist VOD concluída e seus segmentos permanecem no disco após o último acesso. O padrão é `1800000` (30 minutos). |
-| `STREAM_START_TIMEOUT_MS` | Tempo máximo, em milissegundos, para finalizar a playlist HLS VOD. O padrão é `120000`. |
+| `SESSION_IDLE_MS` | Tempo, em milissegundos, que uma sessão de reprodução e seus fragmentos permanecem no disco após o último acesso. O padrão é `1800000` (30 minutos). |
+| `STREAM_START_TIMEOUT_MS` | Tempo máximo, em milissegundos, para produzir a mídia inicial reproduzível. O padrão é `120000`. |
+| `SEEK_SEGMENT_SECONDS` | Duração alvo dos segmentos do HLS VOD buscável. Os cortes finais seguem keyframes reais; o padrão é `4`. |
+| `KEYFRAME_INDEX_TIMEOUT_MS` | Tempo máximo para a indexação inicial de keyframes no HLS VOD. O padrão é `1200000` (20 minutos). O índice é armazenado localmente sem URL ou credenciais. |
 | `TORBOX_RESOLVE_URLS` | Opt-in para encaminhar URLs diretas públicas elegíveis ao Torbox WebDL. O padrão é `false`. |
 | `TORRENT_GATEWAY_URL` | Gateway externo para resolver torrents. Deve responder a `GET /resolve?infoHash=<hash>&fileIdx=<índice>`. |
 | `ALLOW_INSECURE_HTTP` | Permite fontes HTTP. Avalie o risco antes de ativar em ambientes expostos. |
@@ -82,13 +84,24 @@ O Torbox trata fontes torrent nativas no próprio serviço. A resolução de URL
 4. Escolha a fonte de vídeo e a fonte de áudio.
 5. Use **Sincronizar fontes** para ajustar o offset, se necessário.
 6. Valide e salve a combinação.
-7. Em **Configurações**, copie a URL do manifest do NuvioMixer e instale-a no Nuvio.
+7. Opcionalmente, abra **Combinações** e use **Preparar localmente** para deixar o início, um trecho ou todo o VOD pronto antes de abrir no Nuvio.
+8. Em **Configurações**, copie a URL do manifest do NuvioMixer e instale-a no Nuvio.
 
 Para séries, o modelo salvo guarda o addon, tipo de fonte e qualidade escolhidos — não URLs temporárias do episódio. Quando o Nuvio solicitar outro episódio, o Mixer consulta somente os dois provedores escolhidos e disponibiliza a combinação apenas se ambos retornarem fontes equivalentes e validáveis.
 
 ## Reprodução e desempenho
 
-Para manter a duração estável, o Mixer produz uma playlist HLS VOD finalizada antes de entregá-la ao player. A reprodução pode levar alguns segundos para iniciar, conforme tamanho, codec e velocidade das fontes; o limite padrão é de 120 segundos. O resultado termina no menor dos dois fluxos selecionados.
+Para cada combinação, o addon disponibiliza três alternativas. **HLS VOD buscável** entrega duração fixa e permite avançar sem recodificar: na primeira utilização da fonte, o Mixer indexa seus keyframes e guarda localmente somente a timeline derivada, sem URL, token ou credenciais. Esse passo pode ler a mídia uma vez e demorar em arquivos grandes; chamadas seguintes para a mesma fonte reutilizam o índice. **MP4 progressivo** é experimental: declara a duração conhecida do menor fluxo no cabeçalho MP4 e envia fragmentos à medida que são produzidos. Em fontes E-AC-3, o cabeçalho é emitido após o primeiro fragmento para que o codec seja identificado. Ela começa sem aguardar o arquivo inteiro, mas não permite busca para trechos ainda não gerados; quando o remux termina, os ranges e a busca voltam a ser normais. **HLS** é o fallback compatível: começa assim que há segmentos completos, mas a duração aumenta até a playlist terminar.
+
+A reprodução pode levar alguns segundos para iniciar, conforme tamanho, codec e velocidade das fontes; o limite padrão para a mídia inicial é de 120 segundos. O resultado termina no menor dos dois fluxos selecionados, sem recodificação.
+
+### Preload local e cache
+
+Na página **Combinações**, o painel **Preparar localmente** prepara segmentos do HLS VOD no volume Docker antes da reprodução. Você pode preparar o início, um intervalo por tempo exato, tudo a partir de um ponto ou o título completo. O cache mantém a duração fixa e o seek do VOD: o Nuvio serve imediatamente os fragmentos já preparados e, para posições ainda ausentes, o Mixer continua preparando sob demanda.
+
+Os segmentos permanecem no disco até limpeza manual. A página mostra progresso, tamanho em disco, avisos e logs sanitizados do pipeline; URLs de origem, tokens, cookies, headers e chaves não são exibidos. O painel permite limpar somente a mídia de uma combinação, mídia e índice de keyframes, ou todo o cache local.
+
+O preload não reabre a fonte por segmento: cada intervalo solicitado é remuxado por um único processo contínuo, lendo vídeo e áudio uma vez e escrevendo o HLS/fMP4 diretamente no cache local. Em **Tudo**, a reprodução VOD passa a ser inteiramente local. Em **Trecho** ou **Do ponto ao fim**, apenas os fragmentos produzidos ficam locais; posições fora do intervalo continuam usando a stream normal sob demanda. Respostas temporárias `429` e interrupções de leitura são retomadas com backoff, preservando o trecho já pronto.
 
 Fontes HLS/DASH com faixas separadas permitem buscar somente o áudio necessário. Em arquivos MKV/MP4 e torrents, o demux pode precisar ler dados de vídeo mesmo quando apenas o áudio é selecionado.
 

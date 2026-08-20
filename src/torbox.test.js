@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildMagnet, createTorboxResolver } from './torbox.js';
 import { config } from './config.js';
-import { canResolveWebDownload, resolveSource, resolveTorrent, resolveWebDownload } from './stremio.js';
+import { canResolveWebDownload, resolveSource, resolveTorrent, resolveWebDownload, streamEndpoint } from './stremio.js';
 
 const hash = '0123456789abcdef0123456789abcdef01234567';
 
@@ -22,6 +22,15 @@ test('monta magnet com infoHash e apenas hints tracker HTTP/UDP', () => {
   const magnet = new URL(buildMagnet({ infoHash: hash, sources: ['tracker:udp://tracker.example:80/announce', 'tracker:https://tracker.example/announce', 'dht:node', 'tracker:ftp://invalid.example'] }));
   assert.equal(magnet.searchParams.get('xt'), `urn:btih:${hash}`);
   assert.deepEqual(magnet.searchParams.getAll('tr'), ['udp://tracker.example:80/announce', 'https://tracker.example/announce']);
+});
+
+test('a reconsulta de fontes adiciona um cache-buster sem alterar o endpoint normal', () => {
+  const addon = { transportUrl: 'https://addon.example/manifest.json?token=ignored' };
+  const normal = new URL(streamEndpoint(addon, 'series', 'tt22248376:1:7'));
+  const refreshed = new URL(streamEndpoint(addon, 'series', 'tt22248376:1:7', { cacheBust: 123 }));
+  assert.equal(normal.pathname, '/stream/series/tt22248376%3A1%3A7.json');
+  assert.equal(normal.searchParams.has('_nuviomixer_refresh'), false);
+  assert.equal(refreshed.searchParams.get('_nuviomixer_refresh'), '123');
 });
 
 test('cria torrent, espera disponibilidade, usa fileIdx e nunca retorna a chave', async () => {
@@ -73,6 +82,34 @@ test('reutiliza hash existente, prioriza filename e informa progresso se ainda n
     return json({ success: true, data: [{ id: 75, hash, download_finished: false, download_present: false, progress: 37, files: [] }] });
   }, { maxWaitMs: 0 });
   await assert.rejects(notReady.resolveTorrent({ kind: 'torrent', infoHash: hash, fileIdx: 0 }), /Progresso: 37%/);
+});
+
+test('repete falhas transitórias e explica falha de DNS sem expor a chave', async () => {
+  let calls = 0;
+  const delays = [];
+  const resolver = resolverWith(async (url) => {
+    calls += 1;
+    const request = new URL(url);
+    if (request.pathname.endsWith('/torrents/mylist')) {
+      if (calls === 1) return json({ success: false, detail: 'temporariamente indisponível' }, 503);
+      return json({ success: true, data: [{ id: 73, hash, download_finished: false, download_present: false, progress: 20, files: [] }] });
+    }
+    throw new Error('Requisição inesperada.');
+  }, { sleep: async (milliseconds) => { delays.push(milliseconds); }, maxWaitMs: 0 });
+  await assert.rejects(resolver.resolveTorrent({ kind: 'torrent', infoHash: hash, fileIdx: 0 }), /Progresso: 20%/);
+  assert.equal(calls, 3);
+  assert.deepEqual(delays, [1_000]);
+
+  const dnsFailure = resolverWith(async () => {
+    const error = new TypeError('fetch failed');
+    error.cause = { code: 'ENOTFOUND' };
+    throw error;
+  }, { sleep: async () => {}, requestAttempts: 2 });
+  await assert.rejects(dnsFailure.resolveTorrent({ kind: 'torrent', infoHash: hash, fileIdx: 0 }), (error) => {
+    assert.match(error.message, /DNS do servidor não conseguiu localizar api\.torbox\.app/);
+    assert.equal(error.message.includes('test-api-key'), false);
+    return true;
+  });
 });
 
 test('WebDL é opt-in e recusa fontes que dependem de headers', async () => {

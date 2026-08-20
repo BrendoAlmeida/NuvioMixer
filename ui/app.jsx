@@ -23,6 +23,19 @@ function useRoute() {
 
 function classNames(...names) { return names.filter(Boolean).join(' '); }
 function formatDate(value) { return value ? new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium' }).format(new Date(value)) : ''; }
+function formatDuration(seconds) {
+  if (!Number.isFinite(Number(seconds))) return '—';
+  const total = Math.max(0, Math.round(Number(seconds)));
+  const hours = Math.floor(total / 3600), minutes = Math.floor((total % 3600) / 60), remainder = total % 60;
+  return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}` : `${minutes}:${String(remainder).padStart(2, '0')}`;
+}
+function formatBytes(bytes) {
+  if (!Number.isFinite(Number(bytes)) || !bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(Number(bytes)) / Math.log(1024)));
+  return `${(Number(bytes) / (1024 ** index)).toFixed(index ? 1 : 0)} ${units[index]}`;
+}
+function formatTransferRate(bytesPerSecond) { return Number(bytesPerSecond) > 0 ? `${formatBytes(bytesPerSecond)}/s` : 'Calculando…'; }
 function toastText(error) { return error instanceof Error ? error.message : 'Algo não saiu como esperado.'; }
 function mediaPath(type, contentId, videoId, title = '') { return `/fontes/${type}/${encodeURIComponent(contentId)}?videoId=${encodeURIComponent(videoId)}&title=${encodeURIComponent(title)}`; }
 function sameSource(left, right) {
@@ -190,7 +203,8 @@ function SourcePage({ route, navigate, health, onToast }) {
     if (!hasSelections) return;
     setPreflight({ status: 'loading' });
     try {
-      const result = await api('/api/preflight', { method: 'POST', body: JSON.stringify({ video, audio, audioOffsetSeconds: Number(offset) }) });
+      const result = await api('/api/preflight', { method: 'POST', body: JSON.stringify({ contentId, videoId, type, video, audio, audioOffsetSeconds: Number(offset) }) });
+      if (result.sources) { setVideo(result.sources.video); setAudio(result.sources.audio); }
       setPreflight({ status: 'success', duration: result.duration, durationDriftSeconds: result.durationDriftSeconds });
     }
     catch (error) { setPreflight({ status: 'error', message: toastText(error) }); }
@@ -214,11 +228,11 @@ function SourcePage({ route, navigate, health, onToast }) {
       <section className="source-results"><div className="source-result-header"><div><h2>Resultados disponíveis</h2><p>{job?.status === 'running' ? 'Os resultados aparecem assim que cada provedor responde.' : `${totalStreams} fonte${totalStreams === 1 ? '' : 's'} encontrada${totalStreams === 1 ? '' : 's'}.`}</p></div>{eventError && <span className="inline-warning">{eventError}</span>}</div>{!job && <SourcesSkeleton />}{job && !ready.length && job.status === 'running' && <SourcesSkeleton />}{job && !ready.length && job.status !== 'running' && <EmptyState title="Nenhuma fonte retornou" body="Verifique os addons habilitados em Configurações ou tente outro conteúdo." action="Abrir configurações" onAction={() => navigate('/configuracoes')} />}{providers.filter((provider) => visibleProviders.has(provider.addonId)).map((provider) => <ProviderGroup key={provider.addonId} provider={provider} video={video} audio={audio} setVideo={setVideo} setAudio={setAudio} torrentAvailable={health.torrentSourceAvailable ?? health.torrentGatewayConfigured} />)}</section>
       <aside className="selection-panel"><span className="eyebrow">SUA COMBINAÇÃO</span><h2>Vídeo + áudio</h2><SelectionSummary label="Vídeo" source={video} empty="Escolha uma fonte de vídeo" /><SelectionSummary label="Áudio" source={audio} empty="Escolha uma fonte de áudio" /><div className="selection-fields"><label>Nome da combinação<input value={label} onChange={(event) => setLabel(event.target.value)} /></label></div><button className="secondary wide sync-button" disabled={!hasSelections} onClick={() => setSyncing(true)}>Sincronizar fontes <span>{Number(offset).toFixed(1)} s</span></button>{type === 'series' && <div className="callout info">Este modelo será buscado automaticamente em cada episódio onde os dois provedores retornarem fontes equivalentes.</div>}{preflight?.status === 'success' && <div className="callout success">Compatível sem perdas · duração de {preflight.duration.toFixed(1)} segundos.</div>}{preflight?.status === 'success' && preflight.durationDriftSeconds > 0.1 && <div className="callout warning">As durações diferem {preflight.durationDriftSeconds.toFixed(1)} s. Isso não impede a combinação; ajuste a sincronização se necessário.</div>}{preflight?.status === 'error' && <div className="callout danger">{preflight.message}</div>}<button className="secondary wide" disabled={!hasSelections || preflight?.status === 'loading'} onClick={validate}>{preflight?.status === 'loading' ? 'Validando…' : 'Validar sem perdas'}</button><button className="primary wide" disabled={!hasSelections || saving} onClick={save}>{saving ? 'Salvando…' : type === 'series' ? 'Salvar modelo da série' : 'Salvar combinação'} <span>→</span></button><p className="selection-note">Vídeo e áudio são copiados sem recodificação. Diferenças de duração são informativas, nunca bloqueiam o stream.</p></aside>
     </div>
-    {syncing && <SyncModal video={video} audio={audio} initialOffset={offset} onApply={(nextOffset) => { setOffset(nextOffset); setPreflight(null); setSyncing(false); }} onClose={() => setSyncing(false)} />}
+    {syncing && <SyncModal contentId={contentId} videoId={videoId} type={type} video={video} audio={audio} initialOffset={offset} onSourcesRenewed={(sources) => { setVideo(sources.video); setAudio(sources.audio); }} onApply={(nextOffset) => { setOffset(nextOffset); setPreflight(null); setSyncing(false); }} onClose={() => setSyncing(false)} />}
   </main>;
 }
 
-function SyncModal({ video, audio, initialOffset, onApply, onClose }) {
+function SyncModal({ contentId, videoId, type, video, audio, initialOffset, onSourcesRenewed, onApply, onClose }) {
   const [offset, setOffset] = useState(Number(initialOffset) || 0);
   const [preview, setPreview] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -233,8 +247,9 @@ function SyncModal({ video, audio, initialOffset, onApply, onClose }) {
     const version = ++requestVersion.current;
     setLoading(true); setError('');
     try {
-      const result = await api('/api/previews', { method: 'POST', body: JSON.stringify({ video, audio, audioOffsetSeconds: Number(nextOffset) }) });
+      const result = await api('/api/previews', { method: 'POST', body: JSON.stringify({ contentId, videoId, type, video, audio, audioOffsetSeconds: Number(nextOffset) }) });
       if (version !== requestVersion.current) return void releasePreview(result.preview.id);
+      if (result.sources) onSourcesRenewed(result.sources);
       const previousId = previewId.current;
       previewId.current = result.preview.id;
       setPreview(result.preview); setLoading(false);
@@ -305,11 +320,87 @@ function audioButtonClass(selected) { return selected === 'audio' ? 'selected-so
 
 function MixesPage({ onToast }) {
   const [mixes, setMixes] = useState(null);
-  async function load() { try { setMixes((await api('/api/mixes')).mixes); } catch (error) { onToast(toastText(error)); } }
+  const [cache, setCache] = useState({ bytes: 0, mixes: [] });
+  const [expandedId, setExpandedId] = useState(null);
+  const [clearTarget, setClearTarget] = useState(null);
+  async function load() {
+    try {
+      const [mixResult, cacheResult] = await Promise.all([api('/api/mixes'), api('/api/preload-cache')]);
+      setMixes(mixResult.mixes); setCache(cacheResult);
+    } catch (error) { onToast(toastText(error)); }
+  }
   useEffect(() => { void load(); }, []);
   async function remove(id) { try { await api(`/api/mixes/${id}`, { method: 'DELETE' }); await load(); onToast('Combinação removida.'); } catch (error) { onToast(toastText(error)); } }
-  return <main className="page"><section className="page-heading split-heading"><div><span className="eyebrow">BIBLIOTECA</span><h1>Combinações salvas</h1><p>Essas fontes já aparecem no addon NuvioMixer para o título ou episódio correspondente.</p></div><span className="count-badge">{mixes?.length || 0}</span></section>{mixes === null && <ListSkeleton />}{mixes?.length === 0 && <EmptyState title="Nenhuma combinação salva" body="Volte à busca para escolher vídeo e áudio de seus provedores." />}{mixes?.length > 0 && <section className="mix-list">{mixes.map((mix) => <article className="mix-row" key={mix.id}><div className="mix-icon">◌</div><div><strong>{mix.label}</strong><p>{mix.video.sourceAddonName || 'Vídeo'} <span>+</span> {mix.audio.sourceAddonName || 'Áudio'}</p><small>{mix.scope === 'series' ? 'Série · automático por episódio' : mix.type === 'series' ? 'Episódio' : 'Filme'} · atualizado {formatDate(mix.updatedAt)}</small></div><button className="danger-ghost" onClick={() => remove(mix.id)}>Remover</button></article>)}</section>}</main>;
+  const cacheFor = (id) => cache.mixes?.find((item) => item.id === id)?.status?.cache;
+  return <main className="page mixes-page"><section className="page-heading split-heading"><div><span className="eyebrow">BIBLIOTECA</span><h1>Combinações salvas</h1><p>Prepare localmente antes de abrir no Nuvio e acompanhe o estado real de cada stream.</p></div><span className="count-badge">{mixes?.length || 0}</span></section><section className="cache-summary"><div><span className="eyebrow">CACHE LOCAL</span><strong>{formatBytes(cache.bytes)}</strong><p>Segmentos VOD prontos permanecem no disco até você limpá-los.</p></div><button className="secondary" disabled={!cache.bytes} onClick={() => setClearTarget({ kind: 'all' })}>Limpar todo cache</button></section>{mixes === null && <ListSkeleton />}{mixes?.length === 0 && <EmptyState title="Nenhuma combinação salva" body="Volte à busca para escolher vídeo e áudio de seus provedores." />}{mixes?.length > 0 && <section className="mix-list">{mixes.map((mix) => <article className={classNames('mix-row', expandedId === mix.id && 'expanded')} key={mix.id}><div className="mix-icon">◌</div><div className="mix-copy"><strong>{mix.label}</strong><p>{mix.video.sourceAddonName || 'Vídeo'} <span>+</span> {mix.audio.sourceAddonName || 'Áudio'}</p><small>{mix.scope === 'series' ? 'Série · episódio de referência' : mix.type === 'series' ? 'Episódio' : 'Filme'} · atualizado {formatDate(mix.updatedAt)}</small>{cacheFor(mix.id) && <span className="cache-mini"><StatusDot status={cacheFor(mix.id).state === 'ready' ? 'ready' : 'loading'} />{cacheFor(mix.id).preparedSegments}/{cacheFor(mix.id).totalSegments} segmentos · {formatBytes(cacheFor(mix.id).bytes)}</span>}</div><div className="mix-actions"><button className="secondary" onClick={() => setExpandedId((current) => current === mix.id ? null : mix.id)}>{expandedId === mix.id ? 'Fechar' : 'Preparar localmente'}</button><button className="danger-ghost" onClick={() => remove(mix.id)}>Remover</button></div>{expandedId === mix.id && <PreloadPanel mix={mix} onToast={onToast} onChanged={load} onClear={() => setClearTarget({ kind: 'mix', mix })} />}</article>)}</section>}{clearTarget && <CacheClearDialog target={clearTarget} onClose={() => setClearTarget(null)} onDone={async (includeKeyframes) => {
+    try {
+      const path = clearTarget.kind === 'all' ? '/api/preload-cache' : `/api/mixes/${clearTarget.mix.id}/preload/cache`;
+      await api(path, { method: 'DELETE', body: JSON.stringify({ includeKeyframes }) });
+      await load(); setClearTarget(null); onToast(includeKeyframes ? 'Mídia e índices removidos.' : 'Somente a mídia preparada foi removida.');
+    } catch (error) { onToast(toastText(error)); }
+  }} />}</main>;
 }
+
+function PreloadPanel({ mix, onToast, onChanged, onClear }) {
+  const [status, setStatus] = useState(null);
+  const [sessions, setSessions] = useState(null);
+  const [mode, setMode] = useState('start');
+  const [startSeconds, setStartSeconds] = useState('0');
+  const [endSeconds, setEndSeconds] = useState('');
+  const [pending, setPending] = useState(false);
+  async function refresh() {
+    try {
+      const result = await api(`/api/mixes/${mix.id}/status`);
+      setStatus(result.preload); setSessions(result.sessions);
+    } catch (error) { onToast(toastText(error)); }
+  }
+  useEffect(() => {
+    void refresh();
+    const events = typeof EventSource === 'function' ? new EventSource(`/api/mixes/${encodeURIComponent(mix.id)}/preload/events`) : null;
+    events?.addEventListener('status', (event) => setStatus(JSON.parse(event.data)));
+    const timer = setInterval(() => void refresh(), 4000);
+    return () => { events?.close(); clearInterval(timer); };
+  }, [mix.id]);
+  async function begin() {
+    setPending(true);
+    try {
+      const payload = { mode, startSeconds: Number(startSeconds || 0) };
+      if (mode === 'range' && endSeconds !== '') payload.endSeconds = Number(endSeconds);
+      const result = await api(`/api/mixes/${mix.id}/preload`, { method: 'POST', body: JSON.stringify(payload) });
+      setStatus(result.preload); onChanged();
+    } catch (error) { onToast(toastText(error)); }
+    finally { setPending(false); }
+  }
+  async function cancel() {
+    try { setStatus((await api(`/api/mixes/${mix.id}/preload/cancel`, { method: 'POST' })).preload); }
+    catch (error) { onToast(toastText(error)); }
+  }
+  const running = status?.running;
+  const cache = status?.cache;
+  const events = status?.events || [];
+  const diagnostics = Object.values(sessions || {}).flatMap((session) => session?.diagnostics ? [session.diagnostics] : []);
+  const activeSegments = status?.activeSegments || [];
+  const activity = activeSegments.length ? `Segmentos ${activeSegments.join(', ')}` : status?.currentSegment ? `Segmento ${status.currentSegment}` : status?.indexingElapsedSeconds !== null && status?.indexingElapsedSeconds !== undefined ? `Indexando há ${formatDuration(status.indexingElapsedSeconds)}` : running ? 'Validando fontes' : 'Em espera';
+  return <section className="preload-panel" aria-label={`Preparação local de ${mix.label}`}><header><div><span className="eyebrow">PRÉ-CARREGAMENTO VOD</span><h2>Pronto antes de abrir no Nuvio</h2><p>A duração fixa e o avanço continuam disponíveis. O Nuvio usa o que já estiver local e prepara o restante sob demanda.</p></div><span className={classNames('status-chip', status?.state === 'ready' ? 'success' : running ? 'warning' : '')}>{preloadStateLabel(status?.state)}</span></header><div className="preload-metrics"><Metric label="Duração total" value={formatDuration(cache?.duration)} /><Metric label="Segmentos locais" value={cache ? `${cache.preparedSegments}/${cache.totalSegments}` : '0'} /><Metric label="Em disco" value={formatBytes(cache?.bytes)} /><Metric label="Taxa efetiva" value={formatTransferRate(status?.speedBytesPerSecond)} /><Metric label="Atividade" value={activity} /></div><CacheTimeline cache={cache} currentSegment={status?.currentSegment} /><div className="preload-controls"><div className="preload-mode" role="group" aria-label="Modo de preload">{[['start', 'Início'], ['range', 'Trecho'], ['from', 'Do ponto ao fim'], ['all', 'Tudo']].map(([value, label]) => <button type="button" key={value} className={classNames(mode === value && 'selected')} onClick={() => setMode(value)}>{label}</button>)}</div>{(mode === 'range' || mode === 'from') && <div className="time-fields"><label>Início (segundos)<input type="number" min="0" step="1" value={startSeconds} onChange={(event) => setStartSeconds(event.target.value)} /></label>{mode === 'range' && <label>Fim (segundos)<input type="number" min="0" step="1" value={endSeconds} onChange={(event) => setEndSeconds(event.target.value)} placeholder="Obrigatório" /></label>}</div>}<div className="preload-actions"><button className="primary" disabled={pending || running || (mode === 'range' && endSeconds === '')} onClick={begin}>{pending ? 'Iniciando…' : mode === 'all' ? 'Preparar tudo' : 'Iniciar preload'}</button>{running && <button className="secondary" onClick={cancel}>Cancelar</button>}<button className="secondary" disabled={!cache?.bytes} onClick={onClear}>Limpar cache desta combinação</button></div></div>{status?.error && <div className="callout danger">{status.error}</div>}{status?.warnings?.map((warning) => <div className="callout warning" key={warning}>{warning}</div>)}<section className="preload-log-section"><div><h3>Status e logs</h3><span>{events.length} evento{events.length === 1 ? '' : 's'}</span></div>{!events.length && <p className="muted">Ainda não há atividade registrada para esta combinação.</p>}<ol className="preload-log">{events.slice().reverse().map((event, index) => <li className={event.level} key={`${event.at}-${index}`}><time>{new Date(event.at).toLocaleTimeString('pt-BR')}</time><span>{event.message}</span></li>)}{diagnostics.map((diagnostic, index) => <li className="warning" key={`diagnostic-${index}`}><time>FFmpeg</time><span>{diagnostic}</span></li>)}</ol></section></section>;
+}
+
+function Metric({ label, value }) { return <div><span>{label}</span><strong>{value}</strong></div>; }
+function CacheTimeline({ cache, currentSegment }) {
+  const track = useRef(null);
+  const [hoverSeconds, setHoverSeconds] = useState(null);
+  const duration = Number(cache?.duration || 0);
+  const ranges = cache?.cachedRanges || [];
+  const lastCachedSeconds = ranges.at(-1)?.endSeconds || 0;
+  const progress = duration > 0 && Number.isInteger(currentSegment) ? Math.min(100, Math.max(0, ((ranges.at(-1)?.endSeconds || 0) / duration) * 100)) : null;
+  function updateHover(event) {
+    const rect = track.current?.getBoundingClientRect();
+    if (!rect?.width || !duration) return;
+    setHoverSeconds(Math.max(0, Math.min(duration, ((event.clientX - rect.left) / rect.width) * duration)));
+  }
+  return <section className="cache-timeline" aria-label="Trechos disponíveis no cache local"><div className="cache-timeline-heading"><span>Disponibilidade local</span><small>{ranges.length ? `${ranges.length} trecho${ranges.length === 1 ? '' : 's'} disponível${ranges.length === 1 ? '' : 'is'}` : 'Nenhum trecho pronto ainda'}</small></div><div className="cache-timeline-summary"><span>Cache até <strong>{formatDuration(lastCachedSeconds)}</strong></span><span>{duration ? `${((lastCachedSeconds / duration) * 100).toFixed(1)}% local` : '—'}</span></div><div ref={track} className="cache-track" role="img" aria-label={ranges.length ? 'Trechos em azul estão disponíveis localmente.' : 'Nenhum trecho disponível localmente.'} onPointerMove={updateHover} onPointerLeave={() => setHoverSeconds(null)}>{ranges.map((range, index) => <i key={`${range.startSeconds}-${index}`} className="cache-range" style={{ left: `${(range.startSeconds / duration) * 100}%`, width: `${Math.max(0.25, ((range.endSeconds - range.startSeconds) / duration) * 100)}%` }} />)}{progress !== null && <b className="cache-cursor" style={{ left: `${progress}%` }} aria-label="Segmento em preparação" />}{hoverSeconds !== null && <output className="cache-hover-time" style={{ left: `${(hoverSeconds / duration) * 100}%` }}>{formatDuration(hoverSeconds)}</output>}</div><div className="cache-timeline-scale"><span>0:00</span><span>{formatDuration(duration)}</span></div></section>;
+}
+function preloadStateLabel(state) { return ({ idle: 'Sem cache', indexing: 'Indexando', preloading: 'Preparando', ready: 'Pronto', partial: 'Parcial', failed: 'Falhou', cancelled: 'Cancelado' })[state] || 'Sem cache'; }
+function CacheClearDialog({ target, onClose, onDone }) { return <div className="modal-backdrop" role="presentation"><section className="cache-dialog" role="dialog" aria-modal="true" aria-labelledby="cache-clear-title"><span className="eyebrow">LIMPEZA DE CACHE</span><h2 id="cache-clear-title">{target.kind === 'all' ? 'Limpar todo o cache local?' : `Limpar cache de “${target.mix.label}”?`}</h2><p>Os segmentos prontos serão removidos. Na próxima abertura ou preload, eles precisarão ser preparados novamente.</p><div className="cache-dialog-actions"><button className="secondary" onClick={onClose}>Cancelar</button><button className="secondary" onClick={() => onDone(false)}>Somente mídia</button><button className="danger-solid" onClick={() => onDone(true)}>Mídia e índices</button></div></section></div>; }
 
 function SettingsPage({ connection, health, navigate, onToast, onHealthChange }) {
   const [addons, setAddons] = useState(null);

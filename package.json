@@ -11,7 +11,7 @@
     "test": "npm run test:server && npm run test:ui",
     "test:server": "node --test src/*.test.js",
     "test:ui": "vitest run",
-    "check": "node --check src/server.js && node --check src/media.js && node --check src/store.js && node --check src/stremio.js && node --check src/catalog.js && node --check src/source-jobs.js && node --check src/series.js && npm run build"
+    "check": "node --check src/server.js && node --check src/media.js && node --check src/fmp4.js && node --check src/store.js && node --check src/stremio.js && node --check src/catalog.js && node --check src/source-jobs.js && node --check src/series.js && npm run build"
   },
   "engines": {
     "node": ">=20"

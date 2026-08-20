@@ -3,12 +3,12 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { extname, join } from 'node:path';
 import { config } from './config.js';
-import { cleanupSessions, discardSession, ensureSession, getSessionFile, preflight, sessionStatus, shutdownSessions } from './media.js';
+import { cancelPreload, cleanupSessions, clearAllPreloadCaches, clearPreloadCache, discardSession, ensureSession, ensureVodSegment, getCachedVodFile, getSessionFile, preloadStatus, preflight, sessionStatus, shutdownSessions, startPreload, subscribePreload } from './media.js';
 import { deleteAddon, deleteMix, getMix, getNuvioConnection, getNuvioConnectionInfo, hasSecret, listAddons, listMixes, saveAddon, saveMix, saveNuvioConnection, saveSecret, updateAddon } from './store.js';
-import { assertSourceUrl, connectNuvio, getStreams, importManifest, listNuvioAddons } from './stremio.js';
+import { assertSourceUrl, connectNuvio, getStreams, importManifest, listNuvioAddons, sourceDisplayName } from './stremio.js';
 import { getCatalogDetail, searchCatalog } from './catalog.js';
 import { cancelSourceJob, createSourceJob, getSourceJob, retryableAddonIds, subscribeSourceJob } from './source-jobs.js';
-import { resolveSeriesEpisode, sourceSelector } from './series.js';
+import { resolveSavedMixSources, resolveSeriesEpisode, sourceSelector } from './series.js';
 
 const publicDir = existsSync(join(process.cwd(), 'dist', 'index.html')) ? join(process.cwd(), 'dist') : join(process.cwd(), 'public');
 const mime = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.m3u8': 'application/vnd.apple.mpegurl', '.m4s': 'video/iso.segment', '.mp4': 'video/mp4', '.json': 'application/json; charset=utf-8' };
@@ -64,23 +64,95 @@ function streamPlaylist(response, path, token) {
   response.end(playlist);
 }
 
+function wait(milliseconds) { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
+
+function pipeFileRange(response, path, start, end) {
+  return new Promise((resolve, reject) => {
+    const source = createReadStream(path, { start, end });
+    source.once('error', reject);
+    source.once('end', resolve);
+    source.pipe(response, { end: false });
+  });
+}
+
+/**
+ * A fragmented MP4 has an initialization header with the final duration and
+ * then receives moof/mdat fragments incrementally. Keeping this response open
+ * lets players consume those fragments as FFmpeg appends them. Seeking becomes
+ * fully available after completion, when streamFile handles normal ranges.
+ */
+async function streamGrowingMp4(request, response, path, isGrowing) {
+  let closed = false;
+  const close = () => { closed = true; };
+  request.once('close', close);
+  response.once('close', close);
+  response.writeHead(200, {
+    'content-type': mime['.mp4'],
+    'accept-ranges': 'none',
+    'cache-control': 'no-store',
+    'transfer-encoding': 'chunked'
+  });
+
+  let position = 0;
+  try {
+    while (!closed) {
+      const size = statSync(path).size;
+      if (size > position) {
+        await pipeFileRange(response, path, position, size - 1);
+        position = size;
+        continue;
+      }
+      if (!isGrowing()) break;
+      await wait(100);
+    }
+  } catch (error) {
+    if (!closed) response.destroy(error);
+  } finally {
+    request.off('close', close);
+    response.off('close', close);
+    if (!response.destroyed) response.end();
+  }
+}
+
 function sanitizeSource(source) {
   if (!source || typeof source !== 'object') throw new Error('Fonte ausente.');
   if (source.kind === 'url') {
     assertSourceUrl(source.url);
     const headers = Object.fromEntries(Object.entries(source.headers || {}).filter(([key, value]) => /^[A-Za-z0-9-]+$/.test(key) && typeof value === 'string' && !/[\r\n]/.test(value)));
-    return { kind: 'url', url: source.url, headers, title: String(source.title || ''), name: String(source.name || ''), filename: source.filename || null, sourceAddonId: source.sourceAddonId || null, sourceAddonName: source.sourceAddonName || null };
+    return { kind: 'url', url: source.url, headers, title: String(source.title || ''), name: String(source.name || ''), sourceName: typeof source.sourceName === 'string' ? source.sourceName.slice(0, 120) : null, filename: source.filename || null, quality: typeof source.quality === 'string' ? source.quality.slice(0, 100) : null, sourceAddonId: source.sourceAddonId || null, sourceAddonName: source.sourceAddonName || null };
   }
-  if (source.kind === 'torrent' && /^[a-fA-F0-9]{40}$|^[a-zA-Z2-7]{32}$/.test(source.infoHash || '')) return { kind: 'torrent', infoHash: source.infoHash, fileIdx: Number(source.fileIdx || 0), sources: Array.isArray(source.sources) ? source.sources.slice(0, 30) : [], title: String(source.title || ''), name: String(source.name || ''), filename: typeof source.filename === 'string' ? source.filename.slice(0, 500) : null, sourceAddonId: source.sourceAddonId || null, sourceAddonName: source.sourceAddonName || null };
+  if (source.kind === 'torrent' && /^[a-fA-F0-9]{40}$|^[a-zA-Z2-7]{32}$/.test(source.infoHash || '')) return { kind: 'torrent', infoHash: source.infoHash, fileIdx: Number(source.fileIdx || 0), sources: Array.isArray(source.sources) ? source.sources.slice(0, 30) : [], title: String(source.title || ''), name: String(source.name || ''), sourceName: typeof source.sourceName === 'string' ? source.sourceName.slice(0, 120) : null, filename: typeof source.filename === 'string' ? source.filename.slice(0, 500) : null, sourceAddonId: source.sourceAddonId || null, sourceAddonName: source.sourceAddonName || null };
   throw new Error('Tipo de fonte não suportado.');
 }
 
-function mixResponse(mix) {
-  const url = `${config.baseUrl}/play/${mix.id}/master.m3u8?token=${encodeURIComponent(mix.playToken)}`;
-  return {
-    name: 'NuvioMixer', title: mix.label, description: `${mix.video.sourceAddonName || 'Vídeo'} + ${mix.audio.sourceAddonName || 'Áudio'}${mix.scope === 'series' || mix.generatedFromTemplateId ? ' · automático por episódio' : ''} · sem recodificação`,
-    url, behaviorHints: { notWebReady: true, filename: `${mix.label.replace(/[^\w.-]+/g, '_')}.mp4`, bingeGroup: `nuviomixer-${mix.id}` }
-  };
+function mixResponses(mix) {
+  const token = encodeURIComponent(mix.playToken);
+  const base = `${config.baseUrl}/play/${mix.id}`;
+  const description = `${sourceDisplayName(mix.video, 'Vídeo')} + ${sourceDisplayName(mix.audio, 'Áudio')}${mix.scope === 'series' || mix.generatedFromTemplateId ? ' · automático por episódio' : ''} · sem recodificação`;
+  const filename = `${mix.label.replace(/[^\w.-]+/g, '_')}.mp4`;
+  return [
+    {
+      name: 'NuvioMixer · HLS VOD buscável',
+      title: mix.label,
+      description: `${description} · duração fixa · indexação inicial`,
+      url: `${base}/vod.m3u8?token=${token}`,
+      behaviorHints: { notWebReady: true, filename, bingeGroup: `nuviomixer-vod-${mix.id}` }
+    },
+    {
+      name: 'NuvioMixer · MP4 progressivo',
+      title: mix.label,
+      description: `${description} · duração fixa · experimental`,
+      url: `${base}/stream.mp4?token=${token}`,
+      behaviorHints: { filename, bingeGroup: `nuviomixer-fmp4-${mix.id}` }
+    },
+    {
+      name: 'NuvioMixer · HLS',
+      title: mix.label,
+      description: `${description} · início rápido`,
+      url: `${base}/master.m3u8?token=${token}`,
+      behaviorHints: { notWebReady: true, filename, bingeGroup: `nuviomixer-hls-${mix.id}` }
+    }
+  ];
 }
 
 function createRuntimeMix(input) {
@@ -113,6 +185,99 @@ function findPlayableMix(id) {
   return runtime;
 }
 
+function sourceAccessRejected(error) {
+  return /\b(?:401|403)\b/.test(String(error instanceof Error ? error.message : error));
+}
+
+async function refreshSavedMixSources(mix) {
+  if (mix.isPreview || mix.generatedFromTemplateId) return null;
+  // The provider may have cached its stream document together with a signed
+  // URL. Bypass intermediary caches only when that URL has already rejected
+  // access; ordinary source searches retain their normal cache behaviour.
+  return resolveSavedMixSources({
+    mix,
+    addons: listAddons(),
+    getStreams: (addon, type, videoId) => getStreams(addon, type, videoId, { forceRefresh: true })
+  });
+}
+
+function sourceRefreshContext(input, video, audio) {
+  const contentId = String(input.contentId || input.videoId || '');
+  return {
+    type: input.type === 'series' ? 'series' : 'movie',
+    contentId,
+    videoId: String(input.videoId || contentId),
+    video,
+    audio,
+    videoSelector: sourceSelector(video),
+    audioSelector: sourceSelector(audio)
+  };
+}
+
+function expiredSourceError() {
+  return new Error('A fonte temporária recusou acesso (HTTP 403). O Mixer consultou o addon novamente, mas não recebeu uma URL renovada utilizável. Atualize as fontes e tente de novo.');
+}
+
+/**
+ * Addons occasionally return an already-expired signed URL from their own
+ * cache. Requery only after the source has actually rejected access, keeping
+ * the first validation fast and avoiding needless addon traffic.
+ */
+async function preflightWithSourceRefresh(input) {
+  const video = sanitizeSource(input.video);
+  const audio = sanitizeSource(input.audio);
+  const mix = sourceRefreshContext(input, video, audio);
+  try {
+    return { video, audio, result: await preflight(video, audio, input.audioOffsetSeconds), refreshed: false };
+  } catch (error) {
+    if (!sourceAccessRejected(error)) throw error;
+  }
+
+  const refreshed = await refreshSavedMixSources(mix);
+  if (!refreshed) throw expiredSourceError();
+  const renewedVideo = sanitizeSource(refreshed.video);
+  const renewedAudio = sanitizeSource(refreshed.audio);
+  try {
+    return {
+      video: renewedVideo,
+      audio: renewedAudio,
+      result: await preflight(renewedVideo, renewedAudio, input.audioOffsetSeconds),
+      refreshed: true
+    };
+  } catch (error) {
+    if (sourceAccessRejected(error)) throw expiredSourceError();
+    throw error;
+  }
+}
+
+async function ensureSessionWithRefresh(mix, transport) {
+  try {
+    await ensureSession(mix, transport);
+    return mix;
+  } catch (error) {
+    if (!sourceAccessRejected(error)) throw error;
+    const refreshed = await refreshSavedMixSources(mix);
+    if (!refreshed) throw new Error('A fonte salva recusou acesso e o addon não retornou uma fonte equivalente. Reabra as fontes e salve a combinação novamente.');
+    const renewedMix = { ...mix, ...refreshed };
+    await ensureSession(renewedMix, transport);
+    return renewedMix;
+  }
+}
+
+async function ensureVodSegmentWithRefresh(mix, index) {
+  try {
+    await ensureVodSegment(mix, index);
+    return mix;
+  } catch (error) {
+    if (!sourceAccessRejected(error)) throw error;
+    const refreshed = await refreshSavedMixSources(mix);
+    if (!refreshed) throw new Error('A fonte salva recusou acesso e o addon não retornou uma fonte equivalente. Reabra as fontes e salve a combinação novamente.');
+    const renewedMix = { ...mix, ...refreshed };
+    await ensureVodSegment(renewedMix, index);
+    return renewedMix;
+  }
+}
+
 function removeRuntimeMix(id) {
   if (!runtimeMixes.delete(id)) return false;
   discardSession(id);
@@ -126,7 +291,14 @@ function cleanupRuntimeMixes() {
 async function resolveTemplateMix(template, videoId) {
   const cached = [...runtimeMixes.values()].find((mix) => mix.generatedFromTemplateId === template.id && mix.videoId === videoId && mix.expiresAt >= Date.now());
   if (cached) return cached;
-  const sources = await resolveSeriesEpisode({ template, videoId, addons: listAddons(), getStreams });
+  let sources;
+  try {
+    sources = await resolveSeriesEpisode({ template, videoId, addons: listAddons(), getStreams });
+  } catch {
+    // A provider outage must not turn the complete Stremio/Nuvio response into
+    // HTTP 400; another template or an already-saved mix may still be usable.
+    return null;
+  }
   if (!sources) return null;
   try {
     await preflight(sources.video, sources.audio, template.audioOffsetSeconds);
@@ -245,27 +417,33 @@ async function handleApi(request, response, url) {
 
   if (url.pathname === '/api/preflight' && method(request, 'POST')) {
     const input = await body(request);
-    const result = await preflight(sanitizeSource(input.video), sanitizeSource(input.audio), input.audioOffsetSeconds);
+    const checked = await preflightWithSourceRefresh(input);
+    const { result } = checked;
     return send(response, 200, {
       compatible: result.compatible,
       duration: result.duration,
       adjustedAudioDuration: result.adjustedAudioDuration,
       durationDriftSeconds: result.durationDriftSeconds,
       video: result.video.streams,
-      audio: result.audio.streams
+      audio: result.audio.streams,
+      sources: checked.refreshed ? { video: checked.video, audio: checked.audio } : null
     });
   }
 
   if (url.pathname === '/api/previews' && method(request, 'POST')) {
     const input = await body(request);
+    const checked = await preflightWithSourceRefresh(input);
     const preview = createRuntimeMix({
       label: 'Prévia de sincronização', contentId: 'preview', videoId: 'preview', type: 'movie', isPreview: true,
       audioOffsetSeconds: input.audioOffsetSeconds,
-      video: sanitizeSource(input.video), audio: sanitizeSource(input.audio)
+      video: checked.video, audio: checked.audio
     });
     try {
       await ensureSession(preview);
-      return send(response, 201, { preview: { id: preview.id, url: `/play/${preview.id}/master.m3u8?token=${encodeURIComponent(preview.playToken)}`, audioOffsetSeconds: preview.audioOffsetSeconds } });
+      return send(response, 201, {
+        preview: { id: preview.id, url: `/play/${preview.id}/master.m3u8?token=${encodeURIComponent(preview.playToken)}`, audioOffsetSeconds: preview.audioOffsetSeconds },
+        sources: checked.refreshed ? { video: checked.video, audio: checked.audio } : null
+      });
     } catch (error) {
       removeRuntimeMix(preview.id);
       throw error;
@@ -281,19 +459,57 @@ async function handleApi(request, response, url) {
   if (url.pathname === '/api/mixes' && method(request, 'POST')) {
     const input = await body(request);
     if (!input.label || !input.contentId || !input.videoId) throw new Error('Nome, ID do conteúdo e ID do vídeo são obrigatórios.');
-    const video = sanitizeSource(input.video), audio = sanitizeSource(input.audio);
-    await preflight(video, audio, input.audioOffsetSeconds);
+    const checked = await preflightWithSourceRefresh(input);
     const scope = input.type === 'series' && input.scope === 'series' ? 'series' : 'single';
-    return send(response, 201, { mix: saveMix({ ...input, scope, video, audio, videoSelector: scope === 'series' ? sourceSelector(video) : null, audioSelector: scope === 'series' ? sourceSelector(audio) : null }) });
+    return send(response, 201, { mix: saveMix({ ...input, scope, video: checked.video, audio: checked.audio, videoSelector: sourceSelector(checked.video), audioSelector: sourceSelector(checked.audio) }) });
+  }
+  if (url.pathname === '/api/preload-cache' && method(request, 'GET')) {
+    const mixes = listMixes().map((mix) => ({ id: mix.id, label: mix.label, status: preloadStatus(mix.id) }));
+    const bytes = mixes.reduce((total, mix) => total + (mix.status.cache?.bytes || 0), 0);
+    return send(response, 200, { bytes, mixes });
+  }
+  if (url.pathname === '/api/preload-cache' && method(request, 'DELETE')) {
+    const input = await body(request);
+    return send(response, 200, clearAllPreloadCaches({ includeKeyframes: input.includeKeyframes !== false }));
+  }
+  const preloadMatch = /^\/api\/mixes\/([^/]+)\/preload(?:\/(events|cancel|cache))?$/.exec(url.pathname);
+  if (preloadMatch) {
+    const [, id, action] = preloadMatch;
+    const mix = getMix(id);
+    if (!mix) return fail(response, 404, 'Combinação não encontrada.');
+    if (!action && method(request, 'GET')) return send(response, 200, { preload: preloadStatus(id) });
+    if (!action && method(request, 'POST')) {
+      const input = await body(request);
+      const mode = ['start', 'range', 'all', 'from'].includes(input.mode) ? input.mode : 'start';
+      const refreshed = await refreshSavedMixSources(mix);
+      const playableMix = refreshed ? { ...mix, ...refreshed } : mix;
+      return send(response, 202, { preload: startPreload(playableMix, { mode, startSeconds: input.startSeconds, endSeconds: input.endSeconds }) });
+    }
+    if ((action === 'cancel' && method(request, 'POST')) || (!action && method(request, 'DELETE'))) {
+      const preload = cancelPreload(id);
+      return preload ? send(response, 200, { preload }) : fail(response, 409, 'Nenhum preload em execução para esta combinação.');
+    }
+    if (action === 'events' && method(request, 'GET')) {
+      response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive' });
+      const unsubscribe = subscribePreload(id, (status) => response.write(`event: status\ndata: ${JSON.stringify(status)}\n\n`));
+      request.on('close', unsubscribe);
+      return;
+    }
+    if (action === 'cache' && method(request, 'DELETE')) {
+      const input = await body(request);
+      return send(response, 200, clearPreloadCache(id, { includeKeyframes: Boolean(input.includeKeyframes) }));
+    }
   }
   if (url.pathname.startsWith('/api/mixes/') && method(request, 'DELETE')) {
     const id = url.pathname.split('/').pop();
     for (const [runtimeId, mix] of runtimeMixes) if (mix.generatedFromTemplateId === id) removeRuntimeMix(runtimeId);
+    if (!getMix(id)) return fail(response, 404, 'Combinação não encontrada.');
+    clearPreloadCache(id, { includeKeyframes: false });
     return deleteMix(id) ? send(response, 204, '') : fail(response, 404, 'Combinação não encontrada.');
   }
   if (url.pathname.startsWith('/api/mixes/') && url.pathname.endsWith('/status') && method(request, 'GET')) {
     const id = url.pathname.split('/')[3];
-    return send(response, 200, { session: sessionStatus(id) });
+    return send(response, 200, { sessions: { vod: sessionStatus(id, 'vod'), hls: sessionStatus(id, 'hls'), fmp4: sessionStatus(id, 'fmp4') }, preload: preloadStatus(id) });
   }
 
   if (url.pathname.startsWith('/api/debrid/') && method(request, 'POST')) {
@@ -346,20 +562,43 @@ async function handler(request, response) {
       const [, type, contentId] = streamMatch;
       const videoId = decodeURIComponent(contentId);
       const mixes = listMixes();
-      const saved = mixes.filter((mix) => mix.scope !== 'series' && mix.type === type && (mix.videoId || mix.contentId) === videoId);
-      const templates = type === 'series' ? mixes.filter((mix) => mix.scope === 'series' && mix.type === 'series') : [];
+      // A series template's reference episode already has verified sources.
+      // Return it immediately rather than waiting for a fresh addon lookup.
+      const saved = mixes.filter((mix) => mix.type === type && (mix.videoId || mix.contentId) === videoId && (mix.scope !== 'series' || type === 'series'));
+      const templates = type === 'series'
+        ? mixes.filter((mix) => mix.scope === 'series' && mix.type === 'series' && (mix.videoId || mix.contentId) !== videoId)
+        : [];
       const generated = (await Promise.all(templates.map((template) => resolveTemplateMix(template, videoId)))).filter(Boolean);
-      const streams = [...saved, ...generated].map(mixResponse);
+      const streams = [...saved, ...generated].flatMap(mixResponses);
       return send(response, 200, { streams }, { 'access-control-allow-origin': '*' });
     }
-    const playMatch = /^\/play\/([^/]+)\/(master\.m3u8|init\.mp4|segment-\d{5}\.m4s)$/.exec(url.pathname);
+    const playMatch = /^\/play\/([^/]+)\/(stream\.mp4|master\.m3u8|init\.mp4|segment-\d{5}\.m4s|vod\.m3u8|vod-init\.mp4|vod-segment-\d{5}-\d{3}\.m4s)$/.exec(url.pathname);
     if (playMatch) {
-      const [, mixId, filename] = playMatch, mix = findPlayableMix(mixId);
+      const [, mixId, filename] = playMatch;
+      let mix = findPlayableMix(mixId);
       if (!mix || url.searchParams.get('token') !== mix.playToken) return fail(response, 404, 'Sessão não encontrada.');
-      if (filename === 'master.m3u8') await ensureSession(mix);
-      const path = getSessionFile(mixId, filename);
+      const transport = filename === 'stream.mp4' ? 'fmp4' : filename.startsWith('vod-') || filename === 'vod.m3u8' ? 'vod' : 'hls';
+      // Opening the VOD manifest initializes (and, when needed, migrates) the
+      // persistent cache timeline before a player sees it. Segment files can
+      // still be served directly from disk afterwards.
+      if (filename === 'vod.m3u8') mix = await ensureSessionWithRefresh(mix, 'vod');
+      // Preloads are self-contained VOD fragments, so they remain available even
+      // when the original provider is temporarily slow or its debrid link changed.
+      const cachedVodPath = transport === 'vod' ? getCachedVodFile(mixId, filename) : null;
+      if (cachedVodPath) return filename === 'vod.m3u8' ? streamPlaylist(response, cachedVodPath, mix.playToken) : streamFile(request, response, cachedVodPath);
+      if (filename === 'master.m3u8' || filename === 'stream.mp4') mix = await ensureSessionWithRefresh(mix, transport);
+      if (transport === 'vod' && filename.startsWith('vod-segment-')) mix = await ensureVodSegmentWithRefresh(mix, Number(/\d{5}/.exec(filename)?.[0]));
+      const path = getSessionFile(mixId, filename, transport);
       if (!path) return fail(response, 404, 'Segmento ainda não está disponível.');
-      return filename === 'master.m3u8' ? streamPlaylist(response, path, mix.playToken) : streamFile(request, response, path);
+      if (filename === 'stream.mp4' && sessionStatus(mixId, 'fmp4')?.state === 'streaming') {
+        return streamGrowingMp4(request, response, path, () => {
+          // A single fMP4 request can remain open for the entire title, unlike
+          // HLS's repeated segment requests, so it must keep the session alive.
+          getSessionFile(mixId, 'stream.mp4', 'fmp4');
+          return sessionStatus(mixId, 'fmp4')?.state === 'streaming';
+        });
+      }
+      return filename === 'master.m3u8' || filename === 'vod.m3u8' ? streamPlaylist(response, path, mix.playToken) : streamFile(request, response, path);
     }
     const requested = url.pathname.replace(/^\//, '');
     if (requested && /^[A-Za-z0-9._/-]+$/.test(requested) && !requested.includes('..')) {

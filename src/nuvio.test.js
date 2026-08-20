@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { connectNuvio } from './stremio.js';
+import { connectNuvio, sourceDisplayName } from './stremio.js';
+
+test('mostra o rótulo da stream escolhida em vez do addon intermediário', () => {
+  assert.equal(sourceDisplayName({ sourceName: 'Comet 2160p', sourceAddonName: 'Comet | ElfHosted | TB' }), 'Comet 2160p');
+  assert.equal(sourceDisplayName({ name: 'RedeFlix Português', sourceAddonName: 'FrostStream' }), 'RedeFlix Português');
+  assert.equal(sourceDisplayName({ sourceAddonName: 'FrostStream' }), 'FrostStream');
+});
 
 test('conecta ao Nuvio usando a chave publishable descoberta e carrega perfis', async () => {
   const originalFetch = globalThis.fetch;

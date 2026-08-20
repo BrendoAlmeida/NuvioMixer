@@ -24,6 +24,22 @@ export function selectEquivalentStream(streams, selector) {
   return compatible.find((stream) => qualityHint(stream) === selector.quality) || null;
 }
 
+/** Reconsulta somente os addons originalmente escolhidos para renovar links temporários. */
+export async function resolveSavedMixSources({ mix, addons, getStreams }) {
+  const videoSelector = mix.videoSelector || sourceSelector(mix.video);
+  const audioSelector = mix.audioSelector || sourceSelector(mix.audio);
+  const selectors = [videoSelector, audioSelector];
+  const requiredIds = [...new Set(selectors.map((selector) => selector?.addonId).filter(Boolean))];
+  if (!requiredIds.length) return null;
+  const available = new Map(addons.filter((addon) => addon.enabled).map((addon) => [addon.id, addon]));
+  if (requiredIds.some((id) => !available.has(id))) return null;
+  const resolved = await Promise.all(requiredIds.map(async (id) => [id, await getStreams(available.get(id), mix.type, mix.videoId || mix.contentId)]));
+  const byAddon = new Map(resolved);
+  const video = selectEquivalentStream(byAddon.get(videoSelector.addonId) || [], videoSelector);
+  const audio = selectEquivalentStream(byAddon.get(audioSelector.addonId) || [], audioSelector);
+  return video && audio ? { video, audio } : null;
+}
+
 export function isEpisodeOfSeries(videoId, seriesId) {
   return String(videoId).startsWith(`${String(seriesId)}:`);
 }

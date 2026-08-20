@@ -2,6 +2,7 @@ const DEFAULT_API_BASE = 'https://api.torbox.app/v1/api';
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_MAX_WAIT_MS = 120_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_REQUEST_ATTEMPTS = 3;
 const DEFAULT_WEB_DOWNLOAD_CACHE_TTL_MS = 5 * 60_000;
 const DEFAULT_WEB_DOWNLOAD_CACHE_LIMIT = 64;
 const PAGE_SIZE = 1_000;
@@ -175,6 +176,34 @@ function outputUrl(value, apiKey) {
   return url.toString();
 }
 
+function providerMessage(payload, token) {
+  const value = [payload?.detail, payload?.msg, payload?.error_description, payload?.message, payload?.error]
+    .find((candidate) => typeof candidate === 'string' && candidate.trim());
+  if (!value || containsSecret(value, token)) return '';
+  return value.trim().slice(0, 500);
+}
+
+function transientStatus(status) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function retryDelay(response, attempt) {
+  const retryAfter = response?.headers?.get('retry-after');
+  const retryAfterSeconds = retryAfter === null || retryAfter === undefined ? NaN : Number(retryAfter);
+  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) return Math.min(retryAfterSeconds * 1_000, 5_000);
+  return Math.min(1_000 * (2 ** (attempt - 1)), 5_000);
+}
+
+function transportFailure(operation, attempts, error) {
+  const code = String(error?.cause?.code || error?.code || '').toUpperCase();
+  const diagnosis = code === 'ENOTFOUND' || code === 'EAI_AGAIN'
+    ? ' O DNS do servidor não conseguiu localizar api.torbox.app.'
+    : error?.name === 'TimeoutError' || error?.name === 'AbortError'
+      ? ' A conexão excedeu o tempo limite.'
+      : '';
+  return new Error(`Torbox não pôde ser contatado durante ${operation} após ${attempts} tentativa${attempts === 1 ? '' : 's'}.${diagnosis} Verifique o DNS e a saída HTTPS do servidor.`);
+}
+
 function fileFor(source, files) {
   if (!Array.isArray(files) || files.length === 0) throw new Error('Torbox não informou arquivos disponíveis para esta fonte.');
   let urlFilename = '';
@@ -229,6 +258,7 @@ export function createTorboxResolver({
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   maxWaitMs = DEFAULT_MAX_WAIT_MS,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  requestAttempts = DEFAULT_REQUEST_ATTEMPTS,
   webDownloadCache = sharedWebDownloadCache,
   webDownloadCacheTtlMs = DEFAULT_WEB_DOWNLOAD_CACHE_TTL_MS,
   webDownloadCacheLimit = DEFAULT_WEB_DOWNLOAD_CACHE_LIMIT
@@ -240,6 +270,7 @@ export function createTorboxResolver({
 
   const root = new URL(`${String(apiBase).replace(/\/$/, '')}/`);
   const timeoutMs = positiveNumber(requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
+  const maxRequestAttempts = Math.max(1, Math.min(4, Math.floor(positiveNumber(requestAttempts, DEFAULT_REQUEST_ATTEMPTS))));
   const cacheTtlMs = positiveNumber(webDownloadCacheTtlMs, DEFAULT_WEB_DOWNLOAD_CACHE_TTL_MS);
   const cacheLimit = Math.max(1, Math.floor(positiveNumber(webDownloadCacheLimit, DEFAULT_WEB_DOWNLOAD_CACHE_LIMIT)));
   const cacheNamespace = `${root.toString()}\u0000${token}\u0000`;
@@ -251,20 +282,32 @@ export function createTorboxResolver({
   }
 
   async function request(operation, path, { method = 'GET', query, headers, body, authorized = true } = {}) {
-    let response;
-    try {
-      response = await fetchImpl(endpoint(path, query), {
-        method,
-        headers: { ...(authorized ? { authorization: `Bearer ${token}` } : {}), ...(headers || {}) },
-        body,
-        signal: AbortSignal.timeout(timeoutMs)
-      });
-    } catch {
-      throw new Error(`Torbox não pôde ser contatado durante ${operation}.`);
+    for (let attempt = 1; attempt <= maxRequestAttempts; attempt += 1) {
+      let response;
+      try {
+        response = await fetchImpl(endpoint(path, query), {
+          method,
+          headers: { ...(authorized ? { authorization: `Bearer ${token}` } : {}), ...(headers || {}) },
+          body,
+          signal: AbortSignal.timeout(timeoutMs)
+        });
+      } catch (error) {
+        if (attempt < maxRequestAttempts) {
+          await sleep(retryDelay(null, attempt));
+          continue;
+        }
+        throw transportFailure(operation, attempt, error);
+      }
+      const payload = await response.json().catch(() => null);
+      if (response.ok && payload?.success !== false) return payload?.data;
+      if (attempt < maxRequestAttempts && transientStatus(response.status)) {
+        await sleep(retryDelay(response, attempt));
+        continue;
+      }
+      const detail = providerMessage(payload, token);
+      throw new Error(`Torbox recusou ${operation} (HTTP ${response.status})${detail ? `: ${detail}` : '.'}`);
     }
-    const payload = await response.json().catch(() => null);
-    if (!response.ok || payload?.success === false) throw new Error(`Torbox recusou ${operation} (HTTP ${response.status}).`);
-    return payload?.data;
+    throw new Error('Torbox não respondeu a uma solicitação.');
   }
 
   async function listTorrents(query = {}) {
